@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: SEE LICENSE IN LICENSE
 pragma solidity ^0.8.18;
 
-import { console } from "forge-std/Test.sol";
 
 /**
  * @title A Lottery contract
@@ -13,6 +12,7 @@ contract Raffle {
     error Raffle_NotEnoughEthSent();
     error Raffle_NotEnoughPlayers();
     error Raffle_StateMismatch();
+    error Raffle_NoUnclaimedBalanceAvailable(address withdrawer);
 
     enum RaffleState {
         OPEN,
@@ -25,17 +25,17 @@ contract Raffle {
 
     uint constant public MIN_PLAYERS = 10;
     uint constant private POSITION_COUNT = 10;
-    uint[POSITION_COUNT] private PRIZES = [ // Percentage of the prize pool as the prize
+    uint[POSITION_COUNT] private PRIZES = [ // Percentage of the prize pool as the prize. total 100% prize distribution
         20,
         15,
         10,
+        9,
+        9,
+        9,
         8,
         8,
-        8,
-        8,
-        8,
-        8,
-        8
+        6,
+        5
     ];
     uint constant private PICK_WINNER_FEE = 4; // Percentage of prize pool taken as fee
 
@@ -44,14 +44,20 @@ contract Raffle {
 
     address payable[] private s_players;
     RaffleState private s_raffle_state = RaffleState.OPEN;
+    uint private s_owners_pool;
+    address[] private s_player_set; // A set of all players which have ever participated in the raffle
+    uint private s_redeemed_pool;
 
     mapping(address => uint) private s_unclaimed_balances;
 
     event EnteredRaffle(address indexed player);
     event PickedWinners(address payable[POSITION_COUNT] positions);
+    event PaymentSuccess(address indexed payee, uint value);
 
     modifier minimumPlayers() {
-        if( s_players.length < MIN_PLAYERS && address(this).balance > 0 ) {
+        if( (s_players.length < MIN_PLAYERS)
+            || (getPrizePool() < (i_entrance_fee * POSITION_COUNT))
+        ) {
             revert Raffle_NotEnoughPlayers();
         }
         _;
@@ -66,7 +72,7 @@ contract Raffle {
 
     modifier returnExtraEth(uint refunds) {
         _;
-        if( msg.value > i_entrance_fee ) {
+        if( refunds > 0 ) {
             payWithCaution(msg.sender, refunds);
         }
     }
@@ -81,6 +87,7 @@ contract Raffle {
     constructor(uint entrace_fee) {
         i_entrance_fee = entrace_fee;
         i_owner = msg.sender;
+        s_player_set.push(msg.sender);
     }
 
     function getEntranceFee() external view returns(uint) {
@@ -103,6 +110,23 @@ contract Raffle {
         return i_owner;
     }
 
+    function getRedeemedPool() external view returns(uint) {
+        return s_redeemed_pool;
+    }
+
+    function getOwnersPool() external view returns(uint) {
+        return s_owners_pool;
+    }
+
+    function getCurrentPositions() minimumPlayers external view returns(address payable[POSITION_COUNT] memory positions, uint[POSITION_COUNT] memory prizes) {
+        positions = getPositions();
+        uint prize_pool = getPrizePool();
+
+        for( uint index; index < POSITION_COUNT; index++ ) {
+            prizes[index] = (PRIZES[index] * prize_pool) / 100;
+        }
+    } 
+
     function enterRaffle() external payable
         checkFee(i_entrance_fee)
         raffleIs(RaffleState.OPEN)
@@ -124,31 +148,54 @@ contract Raffle {
         returnExtraEth(msg.value - getPickWinnerFee())
     {
         s_raffle_state = RaffleState.CALCULATING;
+        uint prize_pool = getPrizePool();
 
-        uint no_of_players = s_players.length;
+        address payable[POSITION_COUNT] memory positions = getPositions();
 
-        // Fetching players at 25%, 50% and 75%
-        // Converting their address to uint256
-        // Adding the three numbers
-        uint random_no = getPlayerAdrressInUint(no_of_players / 2) + getPlayerAdrressInUint(no_of_players / 4) + getPlayerAdrressInUint(no_of_players * 3 / 4);
-
-        address payable[POSITION_COUNT] memory positions = getPositions(random_no, no_of_players);
-
-        payAllPositions(positions, getPrizePool());
+        payAllPositions(positions, prize_pool);
 
         emit PickedWinners(positions);
 
+        s_owners_pool += getPickWinnerFee();
+
         // At end, reset raffle parameters
-        s_players = new address payable[](0);
         s_raffle_state = RaffleState.OPEN;
+        s_redeemed_pool += prize_pool;
+    }
+
+    function withdrawUnclaimedBalance() external {
+        uint balance = s_unclaimed_balances[msg.sender];
+        if( balance == 0 ) {
+            revert Raffle_NoUnclaimedBalanceAvailable(msg.sender);
+        }
+
+        payWithCaution(msg.sender, balance);
+
+        s_unclaimed_balances[msg.sender] -= balance;
     }
 
     function getPickWinnerFee() public view returns(uint) {
-        return (getPrizePool() * PICK_WINNER_FEE) / 100; // PICK_WINNER_FEE% of the prize pool
+        uint minimum_fee = (getPrizePool() * PICK_WINNER_FEE) / 100; // PICK_WINNER_FEE% of the prize pool
+
+        uint position_based_fee;
+        uint prize_pool = getPrizePool();
+
+        address payable[POSITION_COUNT] memory positions = getPositions();
+
+        // This is to prevent users from trying to take multiple positions
+        for( uint index; index < POSITION_COUNT; index++ ) {
+            if( msg.sender == positions[index] ) {
+                position_based_fee += (20 * PRIZES[index] * prize_pool) / 1e4; // 20% of PRIZE% of prize_pool
+            }
+        }
+
+        return minimum_fee > position_based_fee
+            ? minimum_fee
+            : position_based_fee;
     }
 
     function getPrizePool() public view returns(uint) {
-        return i_entrance_fee * s_players.length;
+        return (i_entrance_fee * s_players.length) - s_redeemed_pool;
     }
 
     // Get uint version of the specified player
@@ -158,7 +205,13 @@ contract Raffle {
 
     // Get an array of players as per their position in raffle using the random number supplied,
     // divinding the random number by no_of_players and using it as the index for the winner.
-    function getPositions(uint random_no, uint no_of_players) internal view returns(address payable[POSITION_COUNT] memory positions) {
+    function getPositions() internal view returns(address payable[POSITION_COUNT] memory positions) {
+        uint no_of_players = s_players.length;
+
+        // Fetching players at 25%, 50% and 75%
+        // Converting their address to uint256
+        // Adding the three numbers
+        uint random_no = getPlayerAdrressInUint(no_of_players / 2) + getPlayerAdrressInUint(no_of_players / 4) + getPlayerAdrressInUint(no_of_players * 3 / 4);
         uint l_random_no = random_no; // Local random number
 
         for(uint index; index < POSITION_COUNT; index++) {
@@ -178,11 +231,23 @@ contract Raffle {
         if( !sent ) {
             s_unclaimed_balances[receiver] += value;
         }
+        else {
+            emit PaymentSuccess(receiver, value);
+        }
     }
 
     function payAllPositions(address payable[POSITION_COUNT] memory positions, uint prize_pool) internal {
+        uint distributions;
+
         for(uint index; index < POSITION_COUNT; index++) {
-            payWithCaution(positions[index], (prize_pool * PRIZES[index]) / 100 );
+            uint prize = (prize_pool * PRIZES[index]) / 100;
+            distributions += prize;
+            payWithCaution(positions[index], prize);
+        }
+
+        // Check for remaing marginal pool left due to divisional remainders
+        if( distributions < prize_pool ) {
+            s_owners_pool += (prize_pool - distributions);
         }
     }
 
@@ -202,5 +267,6 @@ contract Raffle {
      * * Whenever the owner of the contract withdraws his funds, he has to share 50% of the earnings with current active players,
      * the winners will again be decided based on the getPositions function
      * in this raffle one player can enter once only.
+     * * Check remainig pool balance and shift it to the owner withdrawl balance : Done
      */
 }

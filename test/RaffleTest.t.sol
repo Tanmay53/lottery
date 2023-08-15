@@ -5,6 +5,8 @@ import { Raffle } from "../src/Raffle.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { DeployRaffle } from "../script/DeployRaffle.s.sol";
 import { HelperConfig } from "../script/HelperConfig.s.sol";
+import { stdError } from "forge-std/StdError.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 contract RaffleTest is Test {
     Raffle private raffle;
@@ -59,7 +61,7 @@ contract RaffleTest is Test {
         console.log("Contract balance is equal to entry fee.");
 
         // Checking if no more than one player got added.
-        vm.expectRevert();
+        vm.expectRevert(stdError.indexOOBError);
         raffle.getPlayer(1);
         console.log("No more than one player added.");
 
@@ -94,7 +96,7 @@ contract RaffleTest is Test {
         for( uint index = 0; index < no_of_entries; index++ ) {
             assertEq(raffle.getPlayer(index), s_player);
         }
-        vm.expectRevert();
+        vm.expectRevert(stdError.indexOOBError);
         raffle.getPlayer(no_of_entries + 1);
         console.log("%s entries recorded for the player", no_of_entries);
 
@@ -114,7 +116,7 @@ contract RaffleTest is Test {
         testEntryWithFeeInMultiples(5, (s_entry_fee * 2) + 1);
     }
 
-    function testEntryWhileCalculating() public {
+    function testEntryWhileCalculating() public view {
 
     }
 
@@ -130,35 +132,93 @@ contract RaffleTest is Test {
     }
 
     function testPickWinner() public {
+        uint original_player_balance = address(s_player).balance;
+
         enterRaffleByPlayer();
 
-        console.log("Reverts because no eth sent");
         vm.expectRevert(Raffle.Raffle_NotEnoughEthSent.selector);
         raffle.pickWinner();
+        console.log("Reverts because no eth sent");
 
         uint pick_winner_fee = raffle.getPickWinnerFee();
 
-        console.log("Reverts if only one player is there in the raffle");
         vm.expectRevert(Raffle.Raffle_NotEnoughPlayers.selector);
         raffle.pickWinner{value: pick_winner_fee}();
+        console.log("Reverts if only one player is there in the raffle");
 
-        enterRaffleMultipleByOwner(raffle.MIN_PLAYERS() - 1/*For first Player added earlier in the function*/ - 1/* One less than minimum player*/);
+        enterRaffleMultipleByPlayer(raffle.MIN_PLAYERS() - 1/*For first Player added earlier in the function*/ - 1/* One less than minimum player*/);
 
         pick_winner_fee = raffle.getPickWinnerFee();
 
-        console.log("Reverts if the players are less than minimul allowed players");
         vm.expectRevert(Raffle.Raffle_NotEnoughPlayers.selector);
         raffle.pickWinner{value: pick_winner_fee}();
+        console.log("Reverts if the players are less than minimum allowed players");
 
         enterRaffleByPlayer();
 
-        console.log("Finally picks a winner with a valid call to pickWinner function");
-        raffle.pickWinner{value: raffle.getPickWinnerFee()}();
+        vm.prank(s_player);
+        // Case if a player with a position initiates pickWinner
+        pick_winner_fee = raffle.getPickWinnerFee();
+        assert( pick_winner_fee <= ((20 * s_entry_fee * 10) / 100) );
+        assert( pick_winner_fee >= ((4 * s_entry_fee * 10) / 100) );
+        // Case if someone without a position initiates pickWinner
+        assert( raffle.getPickWinnerFee() >= ((4 * s_entry_fee * 10) / 100) );
+        console.log("Pick winner fee is in between 20% and 4%");
+
+        uint raffle_pool = raffle.getPrizePool();
+        // Case of Winner retrieving the prizes
+        vm.startPrank(s_player);
+        pick_winner_fee = raffle.getPickWinnerFee();
+
+        vm.recordLogs();
+        raffle.pickWinner{value: pick_winner_fee}();
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        uint total_disbursed;
+        bool emits_payment_success = false;
+
+        for( uint index = 0; index < entries.length; index++ ) {
+            bytes32 event_hash = keccak256("PaymentSuccess(address,uint256)");
+
+            if( event_hash == entries[index].topics[0] ) {
+                assert(uint(entries[index].topics[1]) == uint160(s_player));
+                total_disbursed += abi.decode(entries[index].data, (uint));
+                emits_payment_success = true;
+            }
+
+            if( keccak256("PickedWinners(address[10])") == entries[index].topics[0] ) {
+                address[10] memory positions = abi.decode(entries[index].data, (address[10]));
+                for( uint index_1; index_1 < positions.length; index_1++ ) {
+                    assertEq(positions[index_1], s_player);
+                }
+                console.log('Emits Picked Winners event');
+            }
+        }
+
+        if( emits_payment_success ) {
+            console.log("Emits Payment Success events");
+        } else {
+            fail("Didn't emit payment success event");
+        }
+
+        console.log("Pool:", raffle_pool);
+
+        console.log("Total Paid Out: %s", total_disbursed);
+
+        console.log("Owner's Pool: %s", raffle.getOwnersPool());
+
+        assertEq(address(s_player).balance, original_player_balance - raffle.getOwnersPool() );
+        console.log("Finally picks a winner with a valid call to pickWinner function and pays all the positions.");
+
+        assertEq(raffle.getPrizePool(), 0);
+        console.log("Prize pool is 0 again for the raffle.");
+
+        assert(raffle.getRaffleState() == Raffle.RaffleState.OPEN);
+        console.log("The raffle is OPEN again.");
 
         // Further testing of amounts sent to winners
     }
 
-    function enterRaffleMultipleByOwner(uint count) internal {
+    function enterRaffleMultipleByPlayer(uint count) internal {
         for(uint index = 0; index < count; index++) {
             enterRaffleByPlayer();
         }

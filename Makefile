@@ -11,4 +11,4 @@ test-it:
 	forge test
 
 test-v:
-	forge test -vvv
+	forge test -vv
