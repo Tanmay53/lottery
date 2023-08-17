@@ -13,6 +13,7 @@ contract Raffle {
     error Raffle_NotEnoughPlayers();
     error Raffle_StateMismatch();
     error Raffle_NoUnclaimedBalanceAvailable(address withdrawer);
+    error Raffle_OwnerCannotCallThisMethod();
 
     enum RaffleState {
         OPEN,
@@ -84,6 +85,13 @@ contract Raffle {
         _;
     }
 
+    modifier notOwner() {
+        if( msg.sender == i_owner ) {
+            revert Raffle_OwnerCannotCallThisMethod();
+        }
+        _;
+    }
+
     constructor(uint entrace_fee) {
         i_entrance_fee = entrace_fee;
         i_owner = msg.sender;
@@ -118,6 +126,10 @@ contract Raffle {
         return s_owners_pool;
     }
 
+    function getPlayerCount() external view returns(uint) {
+        return s_players.length;
+    }
+
     function getCurrentPositions() minimumPlayers external view returns(address payable[POSITION_COUNT] memory positions, uint[POSITION_COUNT] memory prizes) {
         positions = getPositions();
         uint prize_pool = getPrizePool();
@@ -145,6 +157,7 @@ contract Raffle {
         checkFee(getPickWinnerFee())
         minimumPlayers
         raffleIs(RaffleState.OPEN)
+        notOwner
         returnExtraEth(msg.value - getPickWinnerFee())
     {
         s_raffle_state = RaffleState.CALCULATING;
@@ -177,17 +190,26 @@ contract Raffle {
     function getPickWinnerFee() public view returns(uint) {
         uint minimum_fee = (getPrizePool() * PICK_WINNER_FEE) / 100; // PICK_WINNER_FEE% of the prize pool
 
-        uint position_based_fee;
+        uint position_based_prize_component;
         uint prize_pool = getPrizePool();
 
         address payable[POSITION_COUNT] memory positions = getPositions();
+        bool callerIsAWinner = false;
 
         // This is to prevent users from trying to take multiple positions
         for( uint index; index < POSITION_COUNT; index++ ) {
-            if( msg.sender == positions[index] ) {
-                position_based_fee += (20 * PRIZES[index] * prize_pool) / 1e4; // 20% of PRIZE% of prize_pool
+            bool position_check = msg.sender == positions[index];
+            if( position_check ) {
+                position_based_prize_component += PRIZES[index];
             }
+            callerIsAWinner = callerIsAWinner || position_check;
         }
+
+        if( !callerIsAWinner ) {
+            return (20 * prize_pool) / 100; // 20% of the prize pool
+        }
+
+        uint position_based_fee = (20 * position_based_prize_component * prize_pool) / 1e4; // 20% of PRIZE% of prize_pool
 
         return minimum_fee > position_based_fee
             ? minimum_fee
@@ -256,10 +278,10 @@ contract Raffle {
      * * Make pickwinner function payable and take 4% as retrieval fee : Done
      * * Make a function to participate in raffle and pickWinner at the same time
      * * Charge the platform fee of 4% of prize pool from the player which calls the pickWinner function : Done
-     * * Ability to participate multiple times at once in a raffle.
+     * * Ability to participate multiple times at once in a raffle. : Done
      * * Ability to start a new raffle.
-     * * Ability to retrive unclaimed balances by the owners.
-     * * Prevent one user from taking it all.
+     * * Ability to retrive unclaimed balances by the owners. : Done , test needed
+     * * Prevent one user from taking it all. : Done
      * * * There can be a case where a player tries to sabotage and invest heavily to gain all the positions in the raffle.
      * * * In this way the sabotager will get access to the funds raffled by the initial minimum players
      * To Prevent this, if one player gets more than one position, then the pickWinner charges increase by 20% of prize won in each position.
@@ -268,5 +290,6 @@ contract Raffle {
      * the winners will again be decided based on the getPositions function
      * in this raffle one player can enter once only.
      * * Check remainig pool balance and shift it to the owner withdrawl balance : Done
+     * * The contract owner never picks the winners : Done
      */
 }

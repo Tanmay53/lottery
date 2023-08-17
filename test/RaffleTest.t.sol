@@ -7,6 +7,7 @@ import { DeployRaffle } from "../script/DeployRaffle.s.sol";
 import { HelperConfig } from "../script/HelperConfig.s.sol";
 import { stdError } from "forge-std/StdError.sol";
 import { Vm } from "forge-std/Vm.sol";
+import { Strings } from "@openzeppelin/utils/Strings.sol";
 
 contract RaffleTest is Test {
     Raffle private raffle;
@@ -16,6 +17,9 @@ contract RaffleTest is Test {
     address public s_player = makeAddr("player");
     uint public constant STARTING_USER_BALANCE = 10e18; // 10 ether
     DeployRaffle private deploy;
+    uint public constant RANDOM_PLAYER_COUNT = 30;
+    address[RANDOM_PLAYER_COUNT] public s_players;
+    uint constant POSITION_COUNT = 10;
 
     // Events
     event EnteredRaffle(address indexed player);
@@ -27,6 +31,11 @@ contract RaffleTest is Test {
         ( s_entry_fee ) = helperConfig.activeNetowrkConfig();
 
         vm.deal(s_player, STARTING_USER_BALANCE);
+
+        for( uint index; index < RANDOM_PLAYER_COUNT; index++ ) {
+            s_players[index] = makeAddr(string.concat("player_", Strings.toString(index)));
+            vm.deal(s_players[index], STARTING_USER_BALANCE);
+        }
     }
 
     function testRaffleContractOwner() public {
@@ -156,19 +165,94 @@ contract RaffleTest is Test {
 
         enterRaffleByPlayer();
 
+        vm.startPrank(msg.sender);
+        pick_winner_fee = raffle.getPickWinnerFee();
+
+        vm.expectRevert(Raffle.Raffle_OwnerCannotCallThisMethod.selector);
+        raffle.pickWinner{value: pick_winner_fee}();
+
+        vm.stopPrank();
+        console.log("Reverts if the contract owner calls the pickWinner function.");
+
         vm.prank(s_player);
         // Case if a player with a position initiates pickWinner
         pick_winner_fee = raffle.getPickWinnerFee();
-        assert( pick_winner_fee <= ((20 * s_entry_fee * 10) / 100) );
-        assert( pick_winner_fee >= ((4 * s_entry_fee * 10) / 100) );
+        uint no_of_players = raffle.getPlayerCount();
+        assert( pick_winner_fee <= ((20 * s_entry_fee * no_of_players) / 100) );
+        assert( pick_winner_fee >= ((4 * s_entry_fee * no_of_players) / 100) );
         // Case if someone without a position initiates pickWinner
-        assert( raffle.getPickWinnerFee() >= ((4 * s_entry_fee * 10) / 100) );
+        assert( raffle.getPickWinnerFee() == ((20 * s_entry_fee * no_of_players) / 100) );
         console.log("Pick winner fee is in between 20% and 4%");
 
-        uint raffle_pool = raffle.getPrizePool();
         // Case of Winner retrieving the prizes
-        vm.startPrank(s_player);
-        pick_winner_fee = raffle.getPickWinnerFee();
+        checkPrizeDistribution(s_player);
+
+        assertEq(address(s_player).balance, original_player_balance - raffle.getOwnersPool() );
+        console.log("Finally picks a winner with a valid call to pickWinner function and pays all the positions.");
+
+        assertEq(raffle.getPrizePool(), 0);
+        console.log("Prize pool is 0 again for the raffle.");
+
+        assert(raffle.getRaffleState() == Raffle.RaffleState.OPEN);
+        console.log("The raffle is OPEN again.");
+    }
+
+    function testPickWinnerWithDifferentPlayers() public {
+        uint no_of_players = 18;
+        enterNPlayersToRaffle(no_of_players);
+
+        uint player_count = raffle.getPlayerCount();
+
+        assertEq(player_count, no_of_players);
+        console.log("Entered %s players into the raffle.", no_of_players);
+
+        assertEq(raffle.getPickWinnerFee(), (20 * s_entry_fee * player_count) / 100);
+        console.log("Pick winner fee for stranger is correct");
+
+        // uint prize_pool = raffle.getPrizePool();
+
+        console.log("Non Winner call the pickWinner function:");
+        checkPrizeDistribution(s_player);
+
+        uint additional_players = 23;
+
+        enterNPlayersToRaffle(additional_players);
+
+        assertEq(raffle.getPlayerCount(), no_of_players + additional_players);
+        console.log("Added additional %s players to the raffle.", additional_players);
+
+        // ( address payable[POSITION_COUNT] memory positions, ) = raffle.getCurrentPositions();
+
+        address player_3 = makeAddr("player_3"); // Player 3 gets the 9th position
+        uint player_3_original_balance = player_3.balance;
+        vm.prank(player_3);
+        uint pick_winner_fee = raffle.getPickWinnerFee();
+        uint prize_pool = raffle.getPrizePool();
+
+        console.log("A Winner (player_3) calls the pickWinner function:");
+        checkPrizeDistribution(player_3);
+
+        assertEq(player_3_original_balance - pick_winner_fee + ((6 * prize_pool) / 100), player_3.balance);
+        console.log("player_3 got 9th position and 6% of the prize pool after deducting the pick_winner_fee");
+    }
+
+    function enterRaffleMultipleByPlayer(uint count) internal {
+        for(uint index = 0; index < count; index++) {
+            enterRaffleByPlayer();
+        }
+    }
+
+    function enterNPlayersToRaffle(uint no_of_players) internal {
+        for( uint index; index < no_of_players; index++ ) {
+            enterRaffle(s_players[index], s_entry_fee);
+        }
+    }
+
+    function checkPrizeDistribution(address caller) public {
+        uint raffle_pool = raffle.getPrizePool();
+        vm.startPrank(caller);
+        uint pick_winner_fee = raffle.getPickWinnerFee();
+        ( address payable[POSITION_COUNT] memory positions, uint[POSITION_COUNT] memory prizes ) = raffle.getCurrentPositions();
 
         vm.recordLogs();
         raffle.pickWinner{value: pick_winner_fee}();
@@ -180,15 +264,17 @@ contract RaffleTest is Test {
             bytes32 event_hash = keccak256("PaymentSuccess(address,uint256)");
 
             if( event_hash == entries[index].topics[0] ) {
-                assert(uint(entries[index].topics[1]) == uint160(s_player));
-                total_disbursed += abi.decode(entries[index].data, (uint));
+                assertEq(uint(entries[index].topics[1]), uint160(address(positions[index])));
+                uint prize = abi.decode(entries[index].data, (uint));
+                assertEq(prize, prizes[index]);
+                total_disbursed += prize;
                 emits_payment_success = true;
             }
 
             if( keccak256("PickedWinners(address[10])") == entries[index].topics[0] ) {
-                address[10] memory positions = abi.decode(entries[index].data, (address[10]));
+                address[10] memory emitted_positions = abi.decode(entries[index].data, (address[10]));
                 for( uint index_1; index_1 < positions.length; index_1++ ) {
-                    assertEq(positions[index_1], s_player);
+                    assertEq(positions[index_1], emitted_positions[index_1]);
                 }
                 console.log('Emits Picked Winners event');
             }
@@ -206,22 +292,7 @@ contract RaffleTest is Test {
 
         console.log("Owner's Pool: %s", raffle.getOwnersPool());
 
-        assertEq(address(s_player).balance, original_player_balance - raffle.getOwnersPool() );
-        console.log("Finally picks a winner with a valid call to pickWinner function and pays all the positions.");
-
-        assertEq(raffle.getPrizePool(), 0);
-        console.log("Prize pool is 0 again for the raffle.");
-
-        assert(raffle.getRaffleState() == Raffle.RaffleState.OPEN);
-        console.log("The raffle is OPEN again.");
-
-        // Further testing of amounts sent to winners
-    }
-
-    function enterRaffleMultipleByPlayer(uint count) internal {
-        for(uint index = 0; index < count; index++) {
-            enterRaffleByPlayer();
-        }
+        vm.stopPrank();
     }
 
     // Check owner of the contract
