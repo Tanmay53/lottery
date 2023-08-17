@@ -46,7 +46,7 @@ contract Raffle {
     address payable[] private s_players;
     RaffleState private s_raffle_state = RaffleState.OPEN;
     uint private s_owners_pool;
-    address[] private s_player_set; // A set of all players which have ever participated in the raffle
+    // address[] private s_owners_raffle_players; // A set of all players which have ever participated in the raffle
     uint private s_redeemed_pool;
 
     mapping(address => uint) private s_unclaimed_balances;
@@ -74,7 +74,7 @@ contract Raffle {
     modifier returnExtraEth(uint refunds) {
         _;
         if( refunds > 0 ) {
-            payWithCaution(msg.sender, refunds);
+            payWithCaution(payable(msg.sender), refunds);
         }
     }
 
@@ -92,10 +92,20 @@ contract Raffle {
         _;
     }
 
+    modifier safeDeductUnclaimedBalance() {
+        uint balance = s_unclaimed_balances[msg.sender];
+        if( balance == 0 ) {
+            revert Raffle_NoUnclaimedBalanceAvailable(msg.sender);
+        }
+
+        _;
+
+        s_unclaimed_balances[msg.sender] -= balance;
+    }
+
     constructor(uint entrace_fee) {
         i_entrance_fee = entrace_fee;
         i_owner = msg.sender;
-        s_player_set.push(msg.sender);
     }
 
     function getEntranceFee() external view returns(uint) {
@@ -176,15 +186,12 @@ contract Raffle {
         s_redeemed_pool += prize_pool;
     }
 
-    function withdrawUnclaimedBalance() external {
-        uint balance = s_unclaimed_balances[msg.sender];
-        if( balance == 0 ) {
-            revert Raffle_NoUnclaimedBalanceAvailable(msg.sender);
-        }
+    function withdrawUnclaimedBalance() external safeDeductUnclaimedBalance {
+        payWithCaution(payable(msg.sender), s_unclaimed_balances[msg.sender]);
+    }
 
-        payWithCaution(msg.sender, balance);
-
-        s_unclaimed_balances[msg.sender] -= balance;
+    function trnsferUnclaimedBalance(address payable to) external safeDeductUnclaimedBalance {
+        payWithCaution(to, s_unclaimed_balances[msg.sender]);
     }
 
     function getPickWinnerFee() public view returns(uint) {
@@ -248,8 +255,8 @@ contract Raffle {
     }
 
     // Pay the receiver and if the transaction fails keep the value in unclaimed balances for the receiver
-    function payWithCaution(address receiver, uint value) internal {
-        ( bool sent, ) = payable(receiver).call{ value: value }("");
+    function payWithCaution(address payable receiver, uint value) internal {
+        ( bool sent, ) = receiver.call{ value: value }("");
         if( !sent ) {
             s_unclaimed_balances[receiver] += value;
         }
@@ -280,16 +287,18 @@ contract Raffle {
      * * Charge the platform fee of 4% of prize pool from the player which calls the pickWinner function : Done
      * * Ability to participate multiple times at once in a raffle. : Done
      * * Ability to start a new raffle.
-     * * Ability to retrive unclaimed balances by the owners. : Done , test needed
+     * * Ability to retrive unclaimed balances by the owners. : Done
      * * Prevent one user from taking it all. : Done
      * * * There can be a case where a player tries to sabotage and invest heavily to gain all the positions in the raffle.
      * * * In this way the sabotager will get access to the funds raffled by the initial minimum players
-     * To Prevent this, if one player gets more than one position, then the pickWinner charges increase by 20% of prize won in each position.
-     * * "Change the Owner" function for unclaimed balances.
+     * To Prevent this, if one player gets more than one position, then the pickWinner charges increase by 20% of prize won in each position. : Done
+     * * "Change the Owner" function for unclaimed balances. : Done
      * * Whenever the owner of the contract withdraws his funds, he has to share 50% of the earnings with current active players,
      * the winners will again be decided based on the getPositions function
      * in this raffle one player can enter once only.
      * * Check remainig pool balance and shift it to the owner withdrawl balance : Done
      * * The contract owner never picks the winners : Done
+     * * Fon non winninig players who pickWinner, the charge has been fixed to 20% of the pool. : Done
+     * * fallback and receive function
      */
 }

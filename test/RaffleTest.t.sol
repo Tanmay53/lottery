@@ -9,6 +9,26 @@ import { stdError } from "forge-std/StdError.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { Strings } from "@openzeppelin/utils/Strings.sol";
 
+contract Reverter {
+    bool dontRevert = false;
+
+    receive() external payable {
+        if( !dontRevert ) {
+            revert();
+        }
+    }
+
+    fallback() external payable {
+        if( !dontRevert ) {
+            revert();
+        }
+    }
+
+    function toggleReverting() external {
+        dontRevert = !dontRevert;
+    }
+}
+
 contract RaffleTest is Test {
     Raffle private raffle;
     HelperConfig private helperConfig;
@@ -20,6 +40,8 @@ contract RaffleTest is Test {
     uint public constant RANDOM_PLAYER_COUNT = 30;
     address[RANDOM_PLAYER_COUNT] public s_players;
     uint constant POSITION_COUNT = 10;
+
+    Reverter public reverter;
 
     // Events
     event EnteredRaffle(address indexed player);
@@ -36,6 +58,9 @@ contract RaffleTest is Test {
             s_players[index] = makeAddr(string.concat("player_", Strings.toString(index)));
             vm.deal(s_players[index], STARTING_USER_BALANCE);
         }
+
+        reverter = new Reverter();
+        vm.deal(address(reverter), STARTING_USER_BALANCE);
     }
 
     function testRaffleContractOwner() public {
@@ -242,6 +267,12 @@ contract RaffleTest is Test {
         }
     }
 
+    function enterRaffleMultipleByMyPlayer(address player, uint count) internal {
+        for(uint index = 0; index < count; index++) {
+            enterRaffle(player, s_entry_fee);
+        }
+    }
+
     function enterNPlayersToRaffle(uint no_of_players) internal {
         for( uint index; index < no_of_players; index++ ) {
             enterRaffle(s_players[index], s_entry_fee);
@@ -293,6 +324,54 @@ contract RaffleTest is Test {
         console.log("Owner's Pool: %s", raffle.getOwnersPool());
 
         vm.stopPrank();
+    }
+
+    function testUnclaimedBalances() public {
+        enterRaffleMultipleByMyPlayer(address(reverter), 10);
+
+        assertEq(raffle.getPlayerCount(), 10);
+        assertEq(raffle.getPlayer(0), address(reverter));
+        console.log("Entered into raffle by reverting contract");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Raffle.Raffle_NoUnclaimedBalanceAvailable.selector, address(reverter))
+        );
+        vm.prank(address(reverter));
+        raffle.withdrawUnclaimedBalance();
+        console.log("Reverts when no unclaimed balance is available.");
+
+        uint pick_winner_fee = raffle.getPickWinnerFee();
+        uint prize_pool = raffle.getPrizePool();
+        raffle.pickWinner{value: raffle.getPickWinnerFee()}();
+
+        uint unclaimedBalance = raffle.getUnclaimedBalance(address(reverter));
+        assert( unclaimedBalance > 0 );
+        assertEq(unclaimedBalance + raffle.getOwnersPool(), prize_pool + pick_winner_fee);
+        console.log("Unclaimed balance available for the reverter contract.");
+
+        vm.prank(address(reverter));
+        raffle.withdrawUnclaimedBalance();
+        assertEq(raffle.getUnclaimedBalance(address(reverter)), unclaimedBalance);
+        console.log("Unable to withdraw using withdrawUnclaimedBalance function because reverter never accepts a value.");
+
+        address player_0 = makeAddr("player_0");
+        uint player_0_starting_balance = player_0.balance;
+        vm.prank(address(reverter));
+        raffle.trnsferUnclaimedBalance(payable(player_0));
+        assertEq(player_0_starting_balance + unclaimedBalance, player_0.balance);
+        assertEq(raffle.getUnclaimedBalance(address(reverter)), 0);
+        console.log("Transfers unclaimed funds to player_0.");
+
+        enterRaffleMultipleByMyPlayer(address(reverter), 10);
+        raffle.pickWinner{value: raffle.getPickWinnerFee()}();
+        uint original_reverter_balance = address(reverter).balance;
+        assertEq(raffle.getUnclaimedBalance(address(reverter)), unclaimedBalance);
+        reverter.toggleReverting();
+        vm.prank(address(reverter));
+        raffle.withdrawUnclaimedBalance();
+        assertEq(raffle.getUnclaimedBalance(address(reverter)), 0);
+        assertEq(address(reverter).balance - original_reverter_balance, unclaimedBalance);
+        console.log("Reverter is now able to withdraw the unclaimed balance after resetting the revert properties");
     }
 
     // Check owner of the contract
