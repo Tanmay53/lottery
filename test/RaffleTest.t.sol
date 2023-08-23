@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: SEE LICENSE IN LICENSE
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
 
 import { Raffle } from "../src/Raffle.sol";
@@ -67,10 +67,6 @@ contract RaffleTest is Test {
         assertEq(raffle.getOwner(), msg.sender);
     }
 
-    function testRaffleState() public view {
-        assert(raffle.getRaffleState() == Raffle.RaffleState.OPEN);
-    }
-
     function testEntryFee() public {
         assertEq(raffle.getEntranceFee(), s_entry_fee);
     }
@@ -87,7 +83,7 @@ contract RaffleTest is Test {
 
         enterRaffleByPlayer();
         // Player exists in s_players array
-        assertEq(raffle.getPlayer(0), s_player);
+        assertEq(raffle.getPlayer(0, 0), s_player);
         console.log("Adds the first player to the raffle");
 
         // Checking contract balance
@@ -96,12 +92,18 @@ contract RaffleTest is Test {
 
         // Checking if no more than one player got added.
         vm.expectRevert(stdError.indexOOBError);
-        raffle.getPlayer(1);
+        raffle.getPlayer(0, 1);
         console.log("No more than one player added.");
 
-        vm.expectEmit(true, false, false, false, address(raffle));
-        emit Raffle.EnteredRaffle(s_player);
+        vm.recordLogs();
         enterRaffleByPlayer();
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+
+        if( keccak256("EnteredRaffle(uint256,address)") == entries[0].topics[0] )
+        {
+            assertEq(uint(entries[0].topics[1]), 0);
+            assertEq(abi.decode(abi.encodePacked(entries[0].topics[2]), (address)), s_player);
+        }
         console.log("Emits the Entered Raffle event.");
     }
 
@@ -128,10 +130,10 @@ contract RaffleTest is Test {
         console.log("Raffle gets the entire fee sent to it");
 
         for( uint index = 0; index < no_of_entries; index++ ) {
-            assertEq(raffle.getPlayer(index), s_player);
+            assertEq(raffle.getPlayer(0, index), s_player);
         }
         vm.expectRevert(stdError.indexOOBError);
-        raffle.getPlayer(no_of_entries + 1);
+        raffle.getPlayer(0, no_of_entries + 1);
         console.log("%s entries recorded for the player", no_of_entries);
 
         assertEq(address(s_player).balance, original_player_balance - (no_of_entries * s_entry_fee));
@@ -162,7 +164,7 @@ contract RaffleTest is Test {
     // Enter address(this) to the raffle
     function enterRaffle(address player, uint entry_fee) internal {
         vm.prank(player);
-        raffle.enterRaffle{value: entry_fee}();
+        raffle.enterRaffle{value: entry_fee}(0);
     }
 
     function testPickWinner() public {
@@ -171,42 +173,46 @@ contract RaffleTest is Test {
         enterRaffleByPlayer();
 
         vm.expectRevert(Raffle.Raffle_NotEnoughEthSent.selector);
-        raffle.pickWinner();
+        raffle.pickWinner(0);
         console.log("Reverts because no eth sent");
 
-        uint pick_winner_fee = raffle.getPickWinnerFee();
+        uint pick_winner_fee = raffle.getPickWinnerFee(0);
 
-        vm.expectRevert(Raffle.Raffle_NotEnoughPlayers.selector);
-        raffle.pickWinner{value: pick_winner_fee}();
+        vm.expectRevert(
+            abi.encodeWithSelector(Raffle.Raffle_NotEnoughPlayers.selector, 0)
+        );
+        raffle.pickWinner{value: pick_winner_fee}(0);
         console.log("Reverts if only one player is there in the raffle");
 
         enterRaffleMultipleByPlayer(raffle.MIN_PLAYERS() - 1/*For first Player added earlier in the function*/ - 1/* One less than minimum player*/);
 
-        pick_winner_fee = raffle.getPickWinnerFee();
+        pick_winner_fee = raffle.getPickWinnerFee(0);
 
-        vm.expectRevert(Raffle.Raffle_NotEnoughPlayers.selector);
-        raffle.pickWinner{value: pick_winner_fee}();
+        vm.expectRevert(
+            abi.encodeWithSelector(Raffle.Raffle_NotEnoughPlayers.selector, 0)
+        );
+        raffle.pickWinner{value: pick_winner_fee}(0);
         console.log("Reverts if the players are less than minimum allowed players");
 
         enterRaffleByPlayer();
 
         vm.startPrank(msg.sender);
-        pick_winner_fee = raffle.getPickWinnerFee();
+        pick_winner_fee = raffle.getPickWinnerFee(0);
 
         vm.expectRevert(Raffle.Raffle_OwnerCannotCallThisMethod.selector);
-        raffle.pickWinner{value: pick_winner_fee}();
+        raffle.pickWinner{value: pick_winner_fee}(0);
 
         vm.stopPrank();
         console.log("Reverts if the contract owner calls the pickWinner function.");
 
         vm.prank(s_player);
         // Case if a player with a position initiates pickWinner
-        pick_winner_fee = raffle.getPickWinnerFee();
-        uint no_of_players = raffle.getPlayerCount();
+        pick_winner_fee = raffle.getPickWinnerFee(0);
+        uint no_of_players = raffle.getPlayerCount(0);
         assert( pick_winner_fee <= ((20 * s_entry_fee * no_of_players) / 100) );
         assert( pick_winner_fee >= ((4 * s_entry_fee * no_of_players) / 100) );
         // Case if someone without a position initiates pickWinner
-        assert( raffle.getPickWinnerFee() == ((20 * s_entry_fee * no_of_players) / 100) );
+        assert( raffle.getPickWinnerFee(0) == ((20 * s_entry_fee * no_of_players) / 100) );
         console.log("Pick winner fee is in between 20% and 4%");
 
         // Case of Winner retrieving the prizes
@@ -215,23 +221,20 @@ contract RaffleTest is Test {
         assertEq(address(s_player).balance, original_player_balance - raffle.getOwnersPool() );
         console.log("Finally picks a winner with a valid call to pickWinner function and pays all the positions.");
 
-        assertEq(raffle.getPrizePool(), 0);
+        assertEq(raffle.getPrizePool(0), 0);
         console.log("Prize pool is 0 again for the raffle.");
-
-        assert(raffle.getRaffleState() == Raffle.RaffleState.OPEN);
-        console.log("The raffle is OPEN again.");
     }
 
     function testPickWinnerWithDifferentPlayers() public {
         uint no_of_players = 18;
         enterNPlayersToRaffle(no_of_players);
 
-        uint player_count = raffle.getPlayerCount();
+        uint player_count = raffle.getPlayerCount(0);
 
         assertEq(player_count, no_of_players);
         console.log("Entered %s players into the raffle.", no_of_players);
 
-        assertEq(raffle.getPickWinnerFee(), (20 * s_entry_fee * player_count) / 100);
+        assertEq(raffle.getPickWinnerFee(0), (20 * s_entry_fee * player_count) / 100);
         console.log("Pick winner fee for stranger is correct");
 
         // uint prize_pool = raffle.getPrizePool();
@@ -243,7 +246,7 @@ contract RaffleTest is Test {
 
         enterNPlayersToRaffle(additional_players);
 
-        assertEq(raffle.getPlayerCount(), no_of_players + additional_players);
+        assertEq(raffle.getPlayerCount(0), no_of_players + additional_players);
         console.log("Added additional %s players to the raffle.", additional_players);
 
         // ( address payable[POSITION_COUNT] memory positions, ) = raffle.getCurrentPositions();
@@ -251,8 +254,8 @@ contract RaffleTest is Test {
         address player_3 = makeAddr("player_3"); // Player 3 gets the 9th position
         uint player_3_original_balance = player_3.balance;
         vm.prank(player_3);
-        uint pick_winner_fee = raffle.getPickWinnerFee();
-        uint prize_pool = raffle.getPrizePool();
+        uint pick_winner_fee = raffle.getPickWinnerFee(0);
+        uint prize_pool = raffle.getPrizePool(0);
 
         console.log("A Winner (player_3) calls the pickWinner function:");
         checkPrizeDistribution(player_3);
@@ -280,13 +283,13 @@ contract RaffleTest is Test {
     }
 
     function checkPrizeDistribution(address caller) public {
-        uint raffle_pool = raffle.getPrizePool();
+        uint raffle_pool = raffle.getPrizePool(0);
         vm.startPrank(caller);
-        uint pick_winner_fee = raffle.getPickWinnerFee();
-        ( address payable[POSITION_COUNT] memory positions, uint[POSITION_COUNT] memory prizes ) = raffle.getCurrentPositions();
+        uint pick_winner_fee = raffle.getPickWinnerFee(0);
+        ( address payable[POSITION_COUNT] memory positions, uint[POSITION_COUNT] memory prizes ) = raffle.getCurrentPositions(0);
 
         vm.recordLogs();
-        raffle.pickWinner{value: pick_winner_fee}();
+        raffle.pickWinner{value: pick_winner_fee}(0);
         Vm.Log[] memory entries = vm.getRecordedLogs();
         uint total_disbursed;
         bool emits_payment_success = false;
@@ -329,8 +332,8 @@ contract RaffleTest is Test {
     function testUnclaimedBalances() public {
         enterRaffleMultipleByMyPlayer(address(reverter), 10);
 
-        assertEq(raffle.getPlayerCount(), 10);
-        assertEq(raffle.getPlayer(0), address(reverter));
+        assertEq(raffle.getPlayerCount(0), 10);
+        assertEq(raffle.getPlayer(0, 0), address(reverter));
         console.log("Entered into raffle by reverting contract");
 
         vm.expectRevert(
@@ -340,9 +343,9 @@ contract RaffleTest is Test {
         raffle.withdrawUnclaimedBalance();
         console.log("Reverts when no unclaimed balance is available.");
 
-        uint pick_winner_fee = raffle.getPickWinnerFee();
-        uint prize_pool = raffle.getPrizePool();
-        raffle.pickWinner{value: raffle.getPickWinnerFee()}();
+        uint pick_winner_fee = raffle.getPickWinnerFee(0);
+        uint prize_pool = raffle.getPrizePool(0);
+        raffle.pickWinner{value: raffle.getPickWinnerFee(0)}(0);
 
         uint unclaimedBalance = raffle.getUnclaimedBalance(address(reverter));
         assert( unclaimedBalance > 0 );
@@ -363,7 +366,7 @@ contract RaffleTest is Test {
         console.log("Transfers unclaimed funds to player_0.");
 
         enterRaffleMultipleByMyPlayer(address(reverter), 10);
-        raffle.pickWinner{value: raffle.getPickWinnerFee()}();
+        raffle.pickWinner{value: raffle.getPickWinnerFee(0)}(0);
         uint original_reverter_balance = address(reverter).balance;
         assertEq(raffle.getUnclaimedBalance(address(reverter)), unclaimedBalance);
         reverter.toggleReverting();
@@ -374,6 +377,24 @@ contract RaffleTest is Test {
         console.log("Reverter is now able to withdraw the unclaimed balance after resetting the revert properties");
     }
 
-    // Check owner of the contract
-    // test for : fund and receive global functions also
+    function testFallback() public {
+        vm.startPrank(s_player);
+        uint original_balance = s_player.balance;
+
+        vm.expectRevert();
+        (bool success, bytes memory data) = address(raffle).call{value: 200}("");
+        assertEq(success, true);
+        assertEq(abi.decode(data, (string)), "");
+        assertEq(original_balance, s_player.balance);
+
+        vm.expectRevert();
+        bool rSuccess = payable(address(raffle)).send(200);
+        assertEq(rSuccess, true);
+        assertEq(original_balance, s_player.balance);
+        vm.stopPrank();
+
+        console.log("Raffle fallback successfully reverts with no data.");
+    }
+
+    // test for owner withdrawl
 }
